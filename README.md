@@ -114,7 +114,7 @@ limitations under the License.
 
 * **Company**: Qadiff LLC
 * **Website**: [https://qadiff.com](https://qadiff.com)
-* **Twitter**: @QadiffTech
+* **Twitter**: @Qadiff
 
 Happy crawling! 🕷️
 
