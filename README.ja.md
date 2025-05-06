@@ -96,6 +96,6 @@ scrapy runspider page_crunch.py \
 
 * **会社名**: Qadiff LLC
 * **Web**: [https://qadiff.com](https://qadiff.com)
-* **Twitter**: @QadiffTech
+* **Twitter**: @Qadiff
 
 Happy crawling! 🕷️
