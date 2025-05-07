@@ -108,6 +108,12 @@ scrapy runspider page_crunch.py \
 | `db_path`         | (自動生成)      | URL追跡用SQLiteデータベースのパス                         |
 | `prime_directive` | `true`         | ロボット排除プロトコルの厳格な遵守を有効/無効             |
 
+### refresh_modeには3つの設定があります：
+
+- none: 既にクロール済みのURLは常にスキップします
+- force: 常に再クロールします
+- auto: 最後のクロールから指定した日数（refresh_daysパラメータ、デフォルトは7日）が経過している場合のみ再クロールします
+
 ---
 
 ## 🛠 開発メモ
