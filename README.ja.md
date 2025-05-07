@@ -1,101 +1,166 @@
-# 🇯🇵 日本語 README
+# PageCrunch
 
-**PageCrunch は、ウェブサイトの特定ディレクトリ配下のみをクローリングし、AI ワークフローで扱いやすい JSONL 形式にまとめるワンファイル Scrapy スパイダーです。**
+**AI データソース向け高性能ウェブクローラー：特定セクションを効率的にクロールし、AIトレーニング用にJSONL形式で出力**
 
 ---
 
-## ✨ 特長
+## ✨ 主な機能
 
-| 機能                  | 説明                                                   |
-| ------------------- | ---------------------------------------------------- |
-| サブツリー限定クロール         | ドメインとパスプレフィクス（例: `/blog/`）の両方で制限し、必要なページだけ取得します。     |
-| JSON Lines 出力       | 1 行 1 ページでストリーム処理や大規模 RAG に最適。                       |
-| 単一ファイル実行            | `scrapy runspider page_crunch.py` だけで OK、プロジェクト生成不要。 |
-| Robots 尊重 & 丁寧なクロール | `robots.txt` を遵守し、待機時間や並列数を調整可能。                     |
-| カスタマイズ簡単            | 引数や Spider 属性でほぼすべて設定できます。                           |
+| 機能                | 説明                                                                      |
+|---------------------|---------------------------------------------------------------------------|
+| ターゲット指定クローリング | ドメインとパスプレフィックスを指定して特定セクションのみを収集                 |
+| コンテンツ変更検出     | SHA-256ハッシュとSQLiteを使用した効率的な重複検出と変更追跡                    |
+| 単一ファイルスパイダー  | `scrapy runspider page_crunch.py`で実行。プロジェクト構造不要                 |
+| ロボット排除対応    | robots.txtと各種metaタグを適切に処理。PrimeDirectiveでアクセス制御               |
+| 高度なカスタマイズ性   | 各種パラメータをスパイダー属性またはCLI引数として公開                          |
 
 ---
 
 ## 📦 インストール
 
-### 前提
+### 必要条件
 
-* Python 3.9 以上
-* pip / venv (`sudo apt install python3-pip python3-venv`)
-* ターゲットサイトへアクセスできるネットワーク
+* Python ≥ 3.9
+* pip & venv (`sudo apt install python3-pip python3-venv` on Debian/Ubuntu/WSL)
+* クロール対象サイトへのインターネット接続 😉
 
 ```bash
-# 任意のディレクトリにコピー
+# クローン（またはコピー）
 mkdir pagecrunch && cd pagecrunch
 cp /path/to/page_crunch.py .
 
-# 仮想環境（推奨）
+# 仮想環境の作成（強く推奨）
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Scrapy インストール
+# Scrapyと関連パッケージのインストール
 pip install --upgrade pip scrapy
 ```
 
----
-
-## 🚀 使い方
+テスト実行のための追加パッケージ：
 
 ```bash
-# 例: https://example.com/sometips/ 配下をクロール → corpus.jsonl
-scrapy runspider page_crunch.py \
-  -a start_url=https://example.com/sometips/ \
-  -a allowed_domain=example.com \
-  -a path_prefix=https://example.com/sometips/ \
-  -s FEEDS=corpus.jsonl:jsonlines
+pip install coverage pytest pytest-cov
 ```
 
-### 出力 (JSONL)
+もしくは
 
-```jsonc
-{"url":"https://example.com/sometips/foo","title":"Foo Tips","html":"<html>…"}
-{"url":"https://example.com/sometips/bar","title":"Bar Tricks","html":"<html>…"}
+```bash
+pip install -r requirements.txt
 ```
 
 ---
 
-## ⚙️ Spider 引数
+## 🚀 使用方法
 
-| 引数               | デフォルト           | 説明                                           |
-| ---------------- | --------------- | -------------------------------------------- |
-| `start_url`      | (必須)            | クロール開始 URL（サブツリーのルート）。                       |
-| `allowed_domain` | (自動推定)          | ドメイン制限。例: `example.com`。                     |
-| `path_prefix`    | `start_url` と同じ | この文字列で始まる URL のみ追跡。                          |
-| `download_delay` | `0.3`           | リクエスト間の待機秒数 (`-s DOWNLOAD_DELAY=0.1` で変更可)。  |
-| `concurrency`    | `8`             | 同時リクエスト数 (`-s CONCURRENT_REQUESTS=16` で変更可)。 |
+```bash
+# 基本：Astroのドキュメントサイトをクロール → astro.jsonl
+scrapy runspider page_crunch.py \
+  -a start_url=https://docs.astro.build/en/getting-started/ \
+  -a domain=astro.build \
+  -o astro.jsonl
+```
+
+### 詳細オプション
+
+```bash
+scrapy runspider page_crunch.py \
+  -a start_url=https://example.com/blog/ \
+  -a domain=example.com \
+  -a ignore_subdomains=true \
+  -a refresh_mode=auto \
+  -a refresh_days=7 \
+  -a db_path=example_urls.db \
+  -a prime_directive=true \
+  -o output.jsonl
+```
+
+### 出力形式 (JSONL)
+
+```jsonc
+{
+  "url": "https://example.com/page",
+  "title": "ページタイトル",
+  "meta_description": "メタ説明",
+  "content": "抽出されたメインコンテンツ",
+  "content_hash": "SHA-256ハッシュ値",
+  "crawled_at": "2025-05-07T13:44:35.675979",
+  "status": 200,
+  "length": 151394,
+  "robots_meta": "",
+  "content_status": "new"  // new, updated, unchanged
+}
+```
+
+各行は独立したJSONオブジェクト。ベクトルDBへの読み込みやAIトレーニングパイプラインに最適です。
+
+---
+
+## ⚙️ スパイダーパラメータ
+
+| パラメータ         | デフォルト      | 説明                                                     |
+|-------------------|----------------|----------------------------------------------------------|
+| `start_url`       | (必須)          | クロール開始URL（サブツリーのルートを指定）                |
+| `domain`          | (必須)          | クロール対象ドメイン（例：example.com）                   |
+| `ignore_subdomains` | `true`         | サブドメインを同じドメインとして扱うかどうか              |
+| `refresh_mode`    | `auto`         | 再クロールの動作: auto/force/none                         |
+| `refresh_days`    | `7`            | 自動再クロールする日数閾値                                |
+| `db_path`         | (自動生成)      | URL追跡用SQLiteデータベースのパス                         |
+| `prime_directive` | `true`         | ロボット排除プロトコルの厳格な遵守を有効/無効             |
 
 ---
 
 ## 🛠 開発メモ
 
-* **WSL での高速化** – Windows ドライブ (`/mnt/c`) ではなく Linux 側 (`~/projects/pagecrunch`) に配置すると I/O が速くなります。
-* **拡張** – `yield` 部分を変更して Markdown 抽出やメタデータ付与を行えます。
+* **パフォーマンス** – WSL環境では、プロジェクトをLinuxホーム (`~/projects/pagecrunch`) に配置し、`/mnt/c/...` を避けるとI/Oが高速化します。
+* **拡張** – コンテンツ抽出やメタデータ処理を独自に追加できます。
+
+### テスト実行
+
+単体テストの実行:
+
+```bash
+python run_tests.py
+```
+
+これにより、カバレッジレポートも生成されます。
 
 ---
 
-## 🤝 コントリビュート
+## 🤝 貢献
 
-1. Fork → ブランチ作成 → PR
-2. 可能ならテスト追加
-3. `flake8` / `black` で整形
+プルリクエスト歓迎！大きな変更を提案する場合は、まずIssueを開いてください。
+
+1. フォーク → 機能ブランチ → PR
+2. 実用的なテストケースを追加
+3. コードスタイル（flake8/black）をパスすること
 
 ---
 
 ## 📄 ライセンス
 
-本プロジェクトは Apache License 2.0 の下で提供されます。詳細は英語版 README のライセンス条項をご覧ください。
+```
+Copyright 2025 Qadiff LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
 
 ---
 
-## 📫 お問い合わせ
+## 📫 連絡先
 
-* **会社名**: Qadiff LLC
-* **Web**: [https://qadiff.com](https://qadiff.com)
+* **会社**: Qadiff LLC
+* **ウェブサイト**: [https://qadiff.com](https://qadiff.com)
 * **Twitter**: @Qadiff
 
 Happy crawling! 🕷️

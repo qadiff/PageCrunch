@@ -1,151 +1,426 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-PageCrunch Spider
 
-A configurable Scrapy spider that crawls specified website subtrees.
 """
-
-import logging
-import hashlib
-from urllib.parse import urlparse
-from datetime import datetime
+PageCrunch: AI データソース向けウェブクローラー
+AI モデル訓練用のデータを JSONL 形式で効率的に収集するための特化型クローラー
+"""
 
 import scrapy
-from scrapy.spiders import CrawlSpider, Rule
 from scrapy.linkextractors import LinkExtractor
-from scrapy.exceptions import CloseSpider
+from scrapy.spiders import CrawlSpider, Rule
+from scrapy.exceptions import NotConfigured
+import sqlite3
+import hashlib
+import json
+import os
+import datetime
+import logging
+import re
+from urllib.parse import urlparse, urljoin
+from w3lib.url import url_query_cleaner
 
-logger = logging.getLogger(__name__)
 
 class PageCrunchSpider(CrawlSpider):
-    """
-    Spider that crawls specified website subtrees and extracts content.
+    name = 'page_crunch'
     
-    Parameters:
-        start_url: URL to start crawling from
-        domain: Allowed domain to crawl
-        path_prefix: URL path prefix to restrict crawling to a subtree
-    """
-    name = 'pagecrunch'
-    
-    # Define empty rules tuple (will be set in __init__)
-    rules = ()
-    
-    custom_settings = {
-        'ROBOTSTXT_OBEY': True,
-        'USER_AGENT': 'PageCrunch/1.0 (+https://example.com/pagecrunch-bot)',
-        'CONCURRENT_REQUESTS': 8,
-        'DOWNLOAD_DELAY': 0.5,
-        'HTTPCACHE_ENABLED': True,
-        'HTTPCACHE_DIR': 'cache/http',
-        'HTTPCACHE_EXPIRATION_SECS': 86400,  # 24 hours
-        'FEED_EXPORT_ENCODING': 'utf-8',
-        'LOG_LEVEL': 'INFO',
-        'CLOSESPIDER_PAGECOUNT': 10000,  # Safety limit
-        'CLOSESPIDER_TIMEOUT': 7200,     # 2 hours max
-    }
-    
-    def __init__(self, start_url=None, domain=None, path_prefix=None, *args, **kwargs):
-        # Initialize parent
-        super(PageCrunchSpider, self).__init__(*args, **kwargs)
+    def __init__(self, start_url=None, domain=None, ignore_subdomains='true',
+                 refresh_mode='auto', refresh_days=7, db_path=None, 
+                 prime_directive='true', *args, **kwargs):
+        """
+        初期化メソッド
         
-        # Validate required parameters
-        if not start_url or not domain:
-            raise CloseSpider("Missing required parameter: start_url and domain must be provided")
+        Args:
+            start_url (str): クロール開始 URL
+            domain (str): 許可ドメイン
+            ignore_subdomains (str): サブドメインを同じドメインとして扱うか (true/false)
+            refresh_mode (str): auto/force/none - 再クロール動作の設定
+            refresh_days (int): 再クロールの日数閾値
+            db_path (str): URL 追跡データベースのパス
+            prime_directive (str): ロボット排除プロトコルを遵守するか (true/false)
+        """
+        # 必須パラメータのチェック
+        if not start_url:
+            raise NotConfigured('start_url is required')
+        if not domain:
+            parsed_url = urlparse(start_url)
+            domain = parsed_url.netloc
         
-        # Extract proper domain from start_url if needed
-        parsed_url = urlparse(start_url)
-        if 'docs.astro.build' in parsed_url.netloc and domain == 'astro.build':
-            domain = 'docs.astro.build'
-            logger.info(f"Adjusted domain to: {domain}")
-        
-        # Set spider attributes
+        # パラメータの設定
         self.start_urls = [start_url]
         self.allowed_domains = [domain]
-        self.path_prefix = path_prefix or start_url
+        self.ignore_subdomains = ignore_subdomains.lower() == 'true'
+        self.refresh_mode = refresh_mode.lower()
+        self.refresh_days = int(refresh_days)
+        self.prime_directive = prime_directive.lower() == 'true'
         
-        logger.info(f"Starting crawl at: {start_url}")
-        logger.info(f"Allowed domains: {self.allowed_domains}")
+        # ドメイン設定の処理
+        self.top_domain = self._get_top_domain(domain)
+        if self.ignore_subdomains:
+            self.allowed_domains = [self.top_domain]
+            
+        # データベース設定
+        self.db_path = db_path or f"{domain.replace('.', '_')}_urls.db"
         
-        # Define crawl rules - allow all paths within domain
-        self.rules = (
-            Rule(
-                LinkExtractor(
-                    # Empty allow means allow all paths
-                    allow=(),
-                    # File extensions to skip
-                    deny_extensions=['jpg', 'jpeg', 'png', 'gif', 'pdf', 'doc', 'docx', 
-                                    'xls', 'xlsx', 'zip', 'tar', 'gz', 'mp3', 'mp4', 'mov', 'avi'],
-                    # Patterns to skip
-                    deny=(
-                        r'/search/',            # Avoid search pages
-                        r'/login/',             # Avoid login pages
-                        r'/logout/',            # Avoid logout pages
-                        r'.*(\?|&)page=\d+.*',  # Avoid pagination
-                        r'.*(\?|&)sort=.*',     # Avoid sort parameters
-                    ),
-                ),
-                callback='parse_item',
-                follow=True
-            ),
-        )
+        # リンク抽出設定
+        self.link_extractor = LinkExtractor(allow_domains=self.allowed_domains)
         
-        # Required for CrawlSpider
-        self._compile_rules()
+        # CrawlSpiderのルールをオーバーライド（空にする）
+        self.rules = ()
+        
+        # 親クラスの初期化を最後に行う
+        super(PageCrunchSpider, self).__init__(*args, **kwargs)
+        
+        # データベースのセットアップ
+        self.setup_database()
+        
+        # ログメッセージ
+        self.log(f"Spider initialized with parameters:", logging.INFO)
+        self.log(f"  start_url: {start_url}", logging.INFO)
+        self.log(f"  domain: {domain}", logging.INFO)
+        self.log(f"  ignore_subdomains: {self.ignore_subdomains}", logging.INFO)
+        self.log(f"  refresh_mode: {self.refresh_mode}", logging.INFO)
+        self.log(f"  refresh_days: {self.refresh_days}", logging.INFO)
+        self.log(f"  db_path: {self.db_path}", logging.INFO)
+        self.log(f"  prime_directive: {self.prime_directive}", logging.INFO)
     
-    def parse_start_url(self, response):
-        """Process the start URL."""
-        logger.info(f"Processing start URL: {response.url}")
-        return self.parse_item(response)
+    def _get_top_domain(self, domain):
+        """
+        ドメインの最上位部分を取得
+        
+        Args:
+            domain (str): ドメイン名
+            
+        Returns:
+            str: トップレベルドメイン
+        """
+        parts = domain.split('.')
+        if len(parts) > 2:
+            # サブドメインを含む場合は、メインドメインと TLD のみを返す
+            return '.'.join(parts[-2:])
+        return domain
+    
+    def setup_database(self):
+        """
+        URL 追跡データベースをセットアップ
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # クロール済み URL を追跡するテーブル
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS crawled_urls (
+            url TEXT PRIMARY KEY,
+            content_hash TEXT,
+            first_crawled_at TIMESTAMP,
+            last_crawled_at TIMESTAMP,
+            change_count INTEGER DEFAULT 0,
+            status INTEGER
+        )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        self.log(f"Database setup completed: {self.db_path}", logging.INFO)
+    
+    def should_crawl_url(self, url):
+        """
+        URL をクロールすべきかを判断
+        
+        Args:
+            url (str): チェックする URL
+            
+        Returns:
+            tuple: (クロールすべきか, 既存のハッシュ値)
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT content_hash, last_crawled_at FROM crawled_urls WHERE url = ?", (url,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        # 未クロールの URL
+        if not result:
+            return True, None
+        
+        existing_hash, last_crawled_str = result
+        
+        # リフレッシュモードに基づいて判断
+        if self.refresh_mode == 'force':
+            return True, existing_hash
+        elif self.refresh_mode == 'none':
+            return False, existing_hash
+        elif self.refresh_mode == 'auto':
+            last_crawled = datetime.datetime.fromisoformat(last_crawled_str)
+            days_since_crawl = (datetime.datetime.now() - last_crawled).days
+            return days_since_crawl >= self.refresh_days, existing_hash
+        
+        # デフォルトはクロールしない
+        return False, existing_hash
+    
+    def update_url_database(self, url, content_hash, status):
+        """
+        URL データベースを更新
+        
+        Args:
+            url (str): 更新する URL
+            content_hash (str): コンテンツのハッシュ値
+            status (int): HTTP ステータスコード
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        now = datetime.datetime.now().isoformat()
+        
+        cursor.execute("SELECT content_hash, change_count FROM crawled_urls WHERE url = ?", (url,))
+        result = cursor.fetchone()
+        
+        if not result:
+            # 新規 URL の場合
+            cursor.execute(
+                "INSERT INTO crawled_urls (url, content_hash, first_crawled_at, last_crawled_at, change_count, status) VALUES (?, ?, ?, ?, ?, ?)",
+                (url, content_hash, now, now, 0, status)
+            )
+        else:
+            existing_hash, change_count = result
+            # ハッシュが変わった場合は変更回数を増やす
+            if existing_hash != content_hash:
+                change_count += 1
+            
+            cursor.execute(
+                "UPDATE crawled_urls SET content_hash = ?, last_crawled_at = ?, change_count = ?, status = ? WHERE url = ?",
+                (content_hash, now, change_count, status, url)
+            )
+        
+        conn.commit()
+        conn.close()
+    
+    def calculate_content_hash(self, content):
+        """
+        コンテンツのハッシュ値を計算
+        
+        Args:
+            content (str): ハッシュ化するコンテンツ
+            
+        Returns:
+            str: SHA-256 ハッシュ値
+        """
+        if isinstance(content, str):
+            content = content.encode('utf-8')
+        return hashlib.sha256(content).hexdigest()
+    
+    def _is_same_domain(self, url):
+        """
+        URL が許可されたドメインに属しているかチェック
+        
+        Args:
+            url (str): チェックする URL
+            
+        Returns:
+            bool: 同一ドメインに属しているか
+        """
+        parsed_url = urlparse(url)
+        url_domain = parsed_url.netloc
+        
+        if self.ignore_subdomains:
+            url_top_domain = self._get_top_domain(url_domain)
+            return url_top_domain == self.top_domain
+        else:
+            return url_domain in self.allowed_domains
+    
+    def _is_robots_allowed(self, response):
+        """
+        robots メタタグでクロールが許可されているかチェック
+        
+        Args:
+            response (Response): レスポンスオブジェクト
+            
+        Returns:
+            bool: クロールが許可されているか
+        """
+        if not self.prime_directive:
+            return True
+        
+        robots_meta = response.xpath('//meta[@name="robots"]/@content').get()
+        if robots_meta:
+            if 'noindex' in robots_meta.lower():
+                self.log(f"Skipping {response.url} due to robots meta noindex", logging.DEBUG)
+                return False
+        
+        return True
+    
+    def extract_content(self, response):
+        """
+        メインコンテンツを抽出
+        
+        Args:
+            response (Response): レスポンスオブジェクト
+            
+        Returns:
+            str: 抽出されたメインコンテンツ
+        """
+        # コンテンツ抽出の優先順位
+        # 1. main タグ
+        # 2. article タグ
+        # 3. .content または #content
+        # 4. .main または #main
+        # 5. body タグ（最後の手段）
+        
+        main_content = response.xpath('//main').get()
+        if main_content:
+            return self._clean_html(main_content)
+        
+        article_content = response.xpath('//article').get()
+        if article_content:
+            return self._clean_html(article_content)
+        
+        content_div = response.css('.content, #content').get()
+        if content_div:
+            return self._clean_html(content_div)
+        
+        main_div = response.css('.main, #main').get()
+        if main_div:
+            return self._clean_html(main_div)
+        
+        # 最後の手段として body コンテンツを使用
+        body_content = response.xpath('//body').get()
+        if body_content:
+            return self._clean_html(body_content)
+        
+        # 何も見つからない場合は HTML 全体を返す
+        return self._clean_html(response.text)
+    
+    def _clean_html(self, html):
+        """
+        HTML からスクリプトやスタイルを削除
+        
+        Args:
+            html (str): 元の HTML
+            
+        Returns:
+            str: クリーンアップされた HTML
+        """
+        # script と style タグを削除
+        html = re.sub(r'<script.*?</script>', '', html, flags=re.DOTALL)
+        html = re.sub(r'<style.*?</style>', '', html, flags=re.DOTALL)
+        
+        # コメントを削除
+        html = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
+        
+        # 連続する空白を削除
+        html = re.sub(r'\s+', ' ', html)
+        
+        return html.strip()
+    
+    def get_content_status(self, current_hash, previous_hash):
+        """
+        コンテンツの状態を判定
+        
+        Args:
+            current_hash (str): 現在のハッシュ値
+            previous_hash (str): 以前のハッシュ値
+            
+        Returns:
+            str: new, updated, または unchanged
+        """
+        if not previous_hash:
+            return "new"
+        elif current_hash != previous_hash:
+            return "updated"
+        else:
+            return "unchanged"
+    
+    def start_requests(self):
+        """
+        クロール開始リクエストを生成
+        """
+        for url in self.start_urls:
+            yield scrapy.Request(url, self.parse_item, dont_filter=True)
     
     def parse_item(self, response):
-        """Extract data from pages."""
-        logger.info(f"Processing page: {response.url}")
+        """
+        ページの処理
+        """
+        url = response.url
+        url_clean = url_query_cleaner(url)
         
-        # Skip non-HTML responses
-        if not response.headers.get('Content-Type', b'').startswith(b'text/html'):
+        # robots メタタグが許可しない場合はスキップ
+        if not self._is_robots_allowed(response):
+            self.log(f"Skipping {url} due to robots restrictions", logging.INFO)
             return
         
-        # Calculate content hash
-        html_content = response.body
-        content_hash = hashlib.sha256(html_content).hexdigest()
+        # コンテンツの抽出
+        content = self.extract_content(response)
+        content_hash = self.calculate_content_hash(content)
         
-        # Extract title with fallbacks
-        title = response.css('title::text').get() or response.css('h1::text').get() or ''
+        # タイトルとメタ説明の取得
+        title = response.css('title::text').get() or ""
+        meta_description = response.xpath('//meta[@name="description"]/@content').get() or ""
         
-        # Extract main content with various fallback strategies
-        main_content = ' '.join(response.css('main p::text, article p::text').getall())
-        if not main_content:
-            main_content = ' '.join(response.css('div.content p::text, div#content p::text').getall())
-        if not main_content:
-            main_content = ' '.join(response.css('p::text').getall())
+        # robots メタタグ情報
+        robots_meta = response.xpath('//meta[@name="robots"]/@content').get() or ""
         
-        # Meta description
-        meta_desc = response.css('meta[name="description"]::attr(content)').get() or ''
+        # 既存のハッシュ値を取得
+        _, previous_hash = self.should_crawl_url(url_clean)
         
+        # コンテンツステータス
+        content_status = self.get_content_status(content_hash, previous_hash)
+        
+        # URL データベースの更新
+        self.update_url_database(url_clean, content_hash, response.status)
+        
+        # 結果の生成
         yield {
-            'url': response.url,
-            'title': title.strip(),
-            'meta_description': meta_desc.strip(),
-            'content': main_content.strip(),
-            'content_hash': content_hash,
-            'crawled_at': datetime.now().isoformat(),
-            'status': response.status,
-            'length': len(html_content),
+            "url": url_clean,
+            "title": title.strip(),
+            "meta_description": meta_description.strip(),
+            "content": content,
+            "content_hash": content_hash,
+            "crawled_at": datetime.datetime.now().isoformat(),
+            "status": response.status,
+            "length": len(content),
+            "robots_meta": robots_meta,
+            "content_status": content_status
         }
         
-    def closed(self, reason):
-        """Called when spider is closed."""
-        logger.info(f"Spider closed: {reason}. Total pages crawled: {self.crawler.stats.get_value('item_scraped_count') or 0}")
-
-# For direct execution (testing only)
-if __name__ == '__main__':
-    from scrapy.crawler import CrawlerProcess
-    from scrapy.utils.project import get_project_settings
+        # リンクの抽出と次のページのリクエスト
+        links = self.link_extractor.extract_links(response)
+        for link in links:
+            # nofollow チェック（prime_directive が有効な場合）
+            if self.prime_directive and 'nofollow' in (link.attrs.get('rel', '') if hasattr(link, 'attrs') else getattr(link, 'rel', '')):
+                continue
+                
+            link_url = link.url
+            
+            # クエリパラメータを削除したクリーンな URL
+            clean_url = url_query_cleaner(link_url)
+            
+            # 同一ドメインチェック
+            if not self._is_same_domain(clean_url):
+                continue
+                
+            # クロールすべきかチェック
+            should_crawl, _ = self.should_crawl_url(clean_url)
+            if should_crawl:
+                yield scrapy.Request(link_url, callback=self.parse_item)
     
-    process = CrawlerProcess(get_project_settings())
-    process.crawl(PageCrunchSpider, 
-                 start_url='https://docs.astro.build/en/getting-started/',
-                 domain='docs.astro.build')
-    process.start()
+    def closed(self, reason):
+        """
+        クローラー終了時の処理
+        """
+        self.log(f"Spider closed: {reason}", logging.INFO)
+        
+        # クロール統計情報の表示
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM crawled_urls")
+        total_urls = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM crawled_urls WHERE change_count > 0")
+        changed_urls = cursor.fetchone()[0]
+        
+        self.log(f"Total crawled URLs: {total_urls}", logging.INFO)
+        self.log(f"URLs with changes: {changed_urls}", logging.INFO)
+        
+        conn.close()
