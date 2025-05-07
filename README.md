@@ -88,6 +88,21 @@ scrapy runspider page_crunch.py \
 
 Each line is an independent JSON object - perfect for loading into vector databases or AI training pipelines.
 
+### URL Tracking Database
+
+PageCrunch creates and maintains a SQLite database for URL tracking. The database has these key features:
+
+* Stores each visited URL with content hash and timestamp
+* Prevents revisiting the same URL in subsequent runs
+* Detects duplicate content at different URLs
+* Uses Write-Ahead Logging (WAL) for better performance
+
+You can query the database directly:
+
+```bash
+sqlite3 example_urls.db "SELECT url, visited_at FROM visited_urls ORDER BY visited_at DESC LIMIT 10;"
+```
+
 ---
 
 ## ⚙️ Spider Parameters

@@ -21,6 +21,62 @@ from urllib.parse import urlparse, urljoin
 from w3lib.url import url_query_cleaner
 
 
+class URLTracker:
+    """Tracks visited URLs using SQLite to avoid duplicates."""
+    
+    def __init__(self, db_path='pagecrunch_urls.db'):
+        """Initialize the URL tracker with a SQLite database."""
+        self.db_path = db_path
+        self.in_memory = db_path == ':memory:'
+        self.conn = None
+        self.init_db()
+    
+    def init_db(self):
+        """Initialize the database and create tables if they don't exist."""
+        create_table = not self.in_memory and not os.path.exists(self.db_path)
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.execute('PRAGMA journal_mode = WAL')  # Better concurrent access
+        
+        if create_table or self.in_memory:
+            self.conn.execute('''
+                CREATE TABLE IF NOT EXISTS visited_urls (
+                    url TEXT PRIMARY KEY,
+                    content_hash TEXT,
+                    visited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            self.conn.execute('CREATE INDEX IF NOT EXISTS idx_content_hash ON visited_urls(content_hash)')
+            self.conn.commit()
+            logger.info(f"Created URL tracking database at {self.db_path}")
+    
+    def has_visited(self, url):
+        """Check if a URL has been visited before."""
+        cursor = self.conn.execute('SELECT 1 FROM visited_urls WHERE url = ?', (url,))
+        return cursor.fetchone() is not None
+    
+    def mark_visited(self, url, content_hash):
+        """Mark a URL as visited with its content hash."""
+        try:
+            self.conn.execute(
+                'INSERT OR REPLACE INTO visited_urls (url, content_hash, visited_at) VALUES (?, ?, CURRENT_TIMESTAMP)',
+                (url, content_hash)
+            )
+            self.conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Error recording visited URL {url}: {e}")
+    
+    def has_identical_content(self, content_hash):
+        """Check if we've seen identical content before (helps detect duplicate content at different URLs)."""
+        cursor = self.conn.execute('SELECT url FROM visited_urls WHERE content_hash = ? LIMIT 1', (content_hash,))
+        result = cursor.fetchone()
+        return result[0] if result else None
+    
+    def close(self):
+        """Close the database connection."""
+        if self.conn:
+            self.conn.close()
+            logger.info(f"Closed URL tracking database at {self.db_path}")
+
 class PageCrunchSpider(CrawlSpider):
     name = 'page_crunch'
     
