@@ -1,43 +1,46 @@
 # PageCrunch
 
-**Lightning‑fast subtree web scraper that distills any section of a website into clean JSONL ready for AI pipelines, with built-in URL deduplication.**
+**High-performance web crawler for AI data sources: Efficiently crawls specific sections and outputs in JSONL format for AI training**
 
 ---
 
-## ✨ Features
+## ✨ Key Features
 
-| Capability             | Description                                                                                    |
-| ---------------------- | ---------------------------------------------------------------------------------------------- |
-| Targeted crawl         | Restrict by domain **and** path prefix (e.g. `/blog/`) so you collect only what you need.      |
-| JSON Lines output      | One page per line—perfect for stream processing, embeddings, and large‑scale RAG.              |
-| Single‑file Spider     | Run with a single command: `scrapy runspider page_crunch.py`. No project scaffolding required. |
-| Robots‑aware & polite  | Respects `robots.txt`; configurable `DOWNLOAD_DELAY`, concurrency, and User‑Agent.             |
-| URL deduplication      | Built-in SQLite tracking to avoid duplicate URLs and content, perfect for AI training data.    |
-| Content hash tracking  | Detects duplicate content at different URLs using SHA-256 hashing.                             |
-| Persistent tracking    | Database persists between runs, so subsequent crawls won't revisit previously scraped URLs.    |
-| Easy to tweak          | All knobs exposed as Spider attributes or CLI `-a` arguments.                                  |
+| Feature             | Description                                                                  |
+|---------------------|------------------------------------------------------------------------------|
+| Targeted Crawling   | Specify domains and path prefixes to collect only specific sections          |
+| Content Change Detection | Efficient duplicate detection and change tracking using SHA-256 hash and SQLite |
+| Single-file Spider  | Run with `scrapy runspider page_crunch.py`. No project structure needed      |
+| Robots Protocol Support | Properly handles robots.txt and various meta tags. Access control with PrimeDirective |
+| Advanced Customization | Various parameters exposed as spider attributes or CLI arguments          |
 
 ---
 
 ## 📦 Installation
 
-### Prerequisites
+### Requirements
 
 * Python ≥ 3.9
 * pip & venv (`sudo apt install python3-pip python3-venv` on Debian/Ubuntu/WSL)
-* Internet connection to fetch the target site 😉
+* Internet connection to the target site 😉
 
 ```bash
-# Clone (or copy) the repo
+# Clone (or copy)
 mkdir pagecrunch && cd pagecrunch
 cp /path/to/page_crunch.py .
 
-# Create an isolated environment (strongly recommended)
+# Create virtual environment (strongly recommended)
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install Scrapy (and any extras you add later)
+# Install Scrapy and related packages
 pip install --upgrade pip scrapy
+```
+
+Additional packages for running tests:
+
+```bash
+pip install coverage pytest pytest-cov
 ```
 
 ---
@@ -45,22 +48,45 @@ pip install --upgrade pip scrapy
 ## 🚀 Usage
 
 ```bash
-# Basic: crawl https://example.com/sometips/ and descendants → corpus.jsonl
+# Basic: Crawl Astro documentation site → astro.jsonl
 scrapy runspider page_crunch.py \
-  -a start_url=https://example.com/sometips/ \
-  -a domain=example.com \
-  -a db_path=example_urls.db \
-  -o corpus.jsonl
+  -a start_url=https://docs.astro.build/en/getting-started/ \
+  -a domain=astro.build \
+  -o astro.jsonl
 ```
 
-### Output format (JSONL)
+### Detailed Options
+
+```bash
+scrapy runspider page_crunch.py \
+  -a start_url=https://example.com/blog/ \
+  -a domain=example.com \
+  -a ignore_subdomains=true \
+  -a refresh_mode=auto \
+  -a refresh_days=7 \
+  -a db_path=example_urls.db \
+  -a prime_directive=true \
+  -o output.jsonl
+```
+
+### Output Format (JSONL)
 
 ```jsonc
-{"url":"https://example.com/sometips/foo","title":"Foo Tips","content":"Main content text...","content_hash":"a1b2c3...","crawled_at":"2025-05-07T06:45:12.345678","status":200,"length":12345}
-{"url":"https://example.com/sometips/bar","title":"Bar Tricks","content":"More content text...","content_hash":"d4e5f6...","crawled_at":"2025-05-07T06:45:15.678901","status":200,"length":6789}
+{
+  "url": "https://example.com/page",
+  "title": "Page Title",
+  "meta_description": "Meta Description",
+  "content": "Extracted Main Content",
+  "content_hash": "SHA-256 Hash Value",
+  "crawled_at": "2025-05-07T13:44:35.675979",
+  "status": 200,
+  "length": 151394,
+  "robots_meta": "",
+  "content_status": "new"  // new, updated, unchanged
+}
 ```
 
-Each line is an independent JSON object—perfect for piping into vector DB loaders or further markdown conversion scripts.
+Each line is an independent JSON object - perfect for loading into vector databases or AI training pipelines.
 
 ### URL Tracking Database
 
@@ -79,50 +105,44 @@ sqlite3 example_urls.db "SELECT url, visited_at FROM visited_urls ORDER BY visit
 
 ---
 
-## ⚙️ Spider Arguments
+## ⚙️ Spider Parameters
 
-| Argument         | Default             | Description                                                             |
-| ---------------- | ------------------- | ----------------------------------------------------------------------- |
-| `start_url`      | (required)          | Seed URL where crawling begins (should point to the subtree root).      |
-| `domain`         | (required)          | Domain to confine crawling, e.g. `example.com`.                         |
-| `path_prefix`    | same as `start_url` | Absolute prefix; only URLs that start with this string are followed.    |
-| `db_path`        | `pagecrunch_urls.db` | Path to SQLite database for URL tracking. Use `:memory:` for in-memory. |
-| `download_delay` | `0.5`               | Seconds to wait between requests. Override via `-s DOWNLOAD_DELAY=0.1`. |
-| `concurrency`    | `8`                 | Parallel requests. Override via `-s CONCURRENT_REQUESTS=16`.            |
+| Parameter         | Default       | Description                                                |
+|-------------------|--------------|------------------------------------------------------------|
+| `start_url`       | (required)    | Starting URL for crawling (specify the subtree root)       |
+| `domain`          | (required)    | Target domain for crawling (e.g., example.com)             |
+| `ignore_subdomains` | `true`     | Whether to treat subdomains as the same domain              |
+| `refresh_mode`    | `auto`        | Re-crawling behavior: auto/force/none                      |
+| `refresh_days`    | `7`           | Threshold days for automatic re-crawling                   |
+| `db_path`         | (auto-generated) | Path to SQLite database for URL tracking                |
+| `prime_directive` | `true`        | Enable/disable strict adherence to robots exclusion protocol |
 
 ---
 
-## 🔍 Advanced Use Cases
+## 🛠 Development Notes
 
-### In-Memory URL Tracking
+* **Performance** – When running in WSL, place the project in your Linux home (`~/projects/pagecrunch`) rather than `/mnt/c/...` for faster I/O.
+* **Extensions** – You can add custom content extraction or metadata processing.
 
-For temporary crawls without persistent URL tracking:
+### Running Tests
 
-```bash
-scrapy runspider page_crunch.py \
-  -a start_url=https://docs.example.com/api/ \
-  -a domain=docs.example.com \
-  -a db_path=:memory: \
-  -o api_docs.jsonl
-```
-
-### Content Deduplication Analysis
-
-To analyze how much duplicate content exists on a site:
+Running unit tests:
 
 ```bash
-sqlite3 example_urls.db "SELECT content_hash, COUNT(*) as num_duplicates FROM visited_urls GROUP BY content_hash HAVING COUNT(*) > 1 ORDER BY num_duplicates DESC;"
+python run_tests.py
 ```
+
+This will also generate a coverage report.
 
 ---
 
 ## 🤝 Contributing
 
-Pull requests are welcome! Please open an issue first to discuss substantial changes.
+Pull requests are welcome! For major changes, please open an issue first to discuss.
 
-1. Fork ‑> Feature branch ‑> PR
-2. Add test cases where practical
-3. Ensure `flake8` / `black` pass
+1. Fork → Feature branch → PR
+2. Add practical test cases
+3. Pass code style checks (flake8/black)
 
 ---
 
