@@ -19,7 +19,7 @@ def run_tests_with_coverage():
     """
     # カバレッジ測定を開始
     cov = coverage.Coverage(
-        source=['page_crunch'],
+        source=['page_crunch', 'html_to_markdown'],
         omit=['*/site-packages/*', '*/dist-packages/*', '*/__pycache__/*']
     )
     cov.start()
