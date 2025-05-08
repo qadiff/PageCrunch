@@ -1,6 +1,6 @@
 # PageCrunch
 
-**High-performance web crawler for AI data sources: Efficiently crawls specific sections and outputs in JSONL format for AI training**
+**High-performance web crawler for AI data sources: Efficiently crawls specific sections and outputs in JSONL format for AI training, with HTML to Markdown conversion capabilities**
 
 ---
 
@@ -12,6 +12,9 @@
 | Content Change Detection | Efficient duplicate detection and change tracking using SHA-256 hash and SQLite |
 | Single-file Spider  | Run with `scrapy runspider page_crunch.py`. No project structure needed      |
 | Robots Protocol Support | Properly handles robots.txt and various meta tags. Access control with PrimeDirective |
+| HTML to Markdown Conversion | Convert collected HTML content to clean Markdown format with customizable options |
+| Content Extraction Mode | Choose between automatic content detection or full body extraction |
+| Error Resilience | Robust error handling for DNS lookup issues and other network problems |
 | Advanced Customization | Various parameters exposed as spider attributes or CLI arguments          |
 
 ---
@@ -28,13 +31,14 @@
 # Clone (or copy)
 mkdir pagecrunch && cd pagecrunch
 cp /path/to/page_crunch.py .
+cp /path/to/html_to_markdown.py .
 
 # Create virtual environment (strongly recommended)
 python3 -m venv .venv
 source .venv/bin/activate
 
 # Install Scrapy and related packages
-pip install --upgrade pip scrapy
+pip install --upgrade pip scrapy html2text
 ```
 
 Additional packages for running tests:
@@ -50,9 +54,20 @@ pip install coverage pytest pytest-cov
 ```bash
 # Basic: Crawl Astro documentation site → astro.jsonl
 scrapy runspider page_crunch.py \
-  -a start_url=https://docs.astro.build/en/getting-started/ \
-  -a domain=astro.build \
-  -o astro.jsonl
+  -a start_url=https://example.com/ \
+  -a domain=examlpe.com \
+  -o example.jsonl
+```
+
+### With Markdown Conversion
+
+```bash
+# Convert HTML to Markdown while crawling
+scrapy runspider page_crunch.py \
+  -a start_url=https://example.com/ \
+  -a domain=example.com \
+  -a convert_markdown=true \
+  -o example.jsonl
 ```
 
 ### Detailed Options
@@ -65,11 +80,17 @@ scrapy runspider page_crunch.py \
   -a refresh_mode=auto \
   -a refresh_days=7 \
   -a db_path=example_urls.db \
-  -a prime_directive=true \
+  -a content_mode=auto \
+  -a convert_markdown=true \
+  -a markdown_heading=atx \
+  -a markdown_preserve_images=true \
+  -a markdown_ignore_links=false \
   -o output.jsonl
 ```
 
 ### Output Format (JSONL)
+
+#### Basic Output (without Markdown conversion)
 
 ```jsonc
 {
@@ -86,26 +107,48 @@ scrapy runspider page_crunch.py \
 }
 ```
 
+#### With Markdown Conversion
+
+```jsonc
+{
+  "url": "https://example.com/page",
+  "title": "Page Title",
+  "meta_description": "Meta Description",
+  "content": "Extracted Main HTML Content",
+  "content_hash": "SHA-256 Hash Value",
+  "crawled_at": "2025-05-07T13:44:35.675979",
+  "status": 200,
+  "length": 151394,
+  "robots_meta": "",
+  "content_status": "new",
+  "markdown_content": "# Page Title\n\nConverted markdown content",
+  "markdown_hash": "SHA-256 Hash of Markdown Content",
+  "markdown_length": 8976
+}
+```
+
 Each line is an independent JSON object - perfect for loading into vector databases or AI training pipelines.
 
 ### URL Tracking Database
 
 PageCrunch creates and maintains a SQLite database for URL tracking. The database has these key features:
 
-* Stores each visited URL with content hash and timestamp
+* Stores each visited URL with content hash, markdown hash, and timestamp
 * Prevents revisiting the same URL in subsequent runs
 * Detects duplicate content at different URLs
-* Uses Write-Ahead Logging (WAL) for better performance
+* Tracks content changes over time
 
 You can query the database directly:
 
 ```bash
-sqlite3 example_urls.db "SELECT url, visited_at FROM visited_urls ORDER BY visited_at DESC LIMIT 10;"
+sqlite3 example_urls.db "SELECT url, last_crawled_at, change_count FROM crawled_urls ORDER BY last_crawled_at DESC LIMIT 10;"
 ```
 
 ---
 
 ## ⚙️ Spider Parameters
+
+### Basic Parameters
 
 | Parameter         | Default       | Description                                                |
 |-------------------|--------------|------------------------------------------------------------|
@@ -115,7 +158,49 @@ sqlite3 example_urls.db "SELECT url, visited_at FROM visited_urls ORDER BY visit
 | `refresh_mode`    | `auto`        | Re-crawling behavior: auto/force/none                      |
 | `refresh_days`    | `7`           | Threshold days for automatic re-crawling                   |
 | `db_path`         | (auto-generated) | Path to SQLite database for URL tracking                |
-| `prime_directive` | `true`        | Enable/disable strict adherence to robots exclusion protocol |
+| `path_prefix`     | `null`        | Only crawl URLs matching this path prefix                  |
+| `output_cache`    | `true`        | Whether to output cached pages in results                  |
+| `content_mode`    | `auto`        | Content extraction mode: auto/body                         |
+
+### Markdown Conversion Parameters
+
+| Parameter                   | Default | Description                                        |
+|----------------------------|---------|----------------------------------------------------|
+| `convert_markdown`           | `false` | Whether to convert HTML to Markdown               |
+| `markdown_heading`           | `atx`   | Heading style: atx (#) or setext (===)           |
+| `markdown_preserve_images`   | `true`  | Whether to preserve image references             |
+| `markdown_preserve_tables`   | `true`  | Whether to preserve table structure              |
+| `markdown_ignore_links`      | `false` | Whether to ignore links in output                |
+| `markdown_code_highlighting` | `true`  | Whether to preserve code highlighting hints      |
+
+---
+
+## 🔍 Content Extraction Modes
+
+PageCrunch offers two content extraction modes:
+
+1. `auto` (default): Intelligently extracts the main content using this priority:
+   - `<main>` tag
+   - `<article>` tag
+   - `.content` or `#content` element
+   - `.main` or `#main` element
+   - `<body>` tag (as a last resort)
+
+2. `body`: Extracts the entire `<body>` tag content
+
+Regardless of the mode, scripts, styles, and HTML comments are always removed.
+
+## 📝 HTML to Markdown Conversion
+
+When `convert_markdown=true`, PageCrunch converts the extracted HTML content to clean Markdown format using the `html2text` library with enhanced pre/post-processing for better results.
+
+Key features of the Markdown converter:
+
+- Heading style options: ATX (#) or Setext (===)
+- Proper code block formatting with language hints
+- Table formatting preservation
+- Image and link handling options
+- Special handling for code highlighting
 
 ---
 
@@ -123,6 +208,7 @@ sqlite3 example_urls.db "SELECT url, visited_at FROM visited_urls ORDER BY visit
 
 * **Performance** – When running in WSL, place the project in your Linux home (`~/projects/pagecrunch`) rather than `/mnt/c/...` for faster I/O.
 * **Extensions** – You can add custom content extraction or metadata processing.
+* **Error Handling** - The crawler includes robust error handling for DNS lookup issues and other network problems, allowing it to continue crawling even when some URLs are inaccessible.
 
 ### Running Tests
 

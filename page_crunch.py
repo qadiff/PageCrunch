@@ -1,18 +1,8 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
-"""
-PageCrunch: Web crawler for AI data sources
-A specialized crawler for efficiently collecting data in JSONL format for AI model training
-
-PageCrunch: AI データソース向けウェブクローラー
-AI モデル訓練用のデータを JSONL 形式で効率的に収集するための特化型クローラー
-"""
-
 import scrapy
 from scrapy.linkextractors import LinkExtractor
 from scrapy.spiders import CrawlSpider, Rule
 from scrapy.exceptions import NotConfigured
+from scrapy.http import HtmlResponse, Request  # HtmlResponseをここで正しくインポート
 import sqlite3
 import hashlib
 import json
@@ -22,6 +12,8 @@ import logging
 import re
 from urllib.parse import urlparse, urljoin
 from w3lib.url import url_query_cleaner
+# Import our HTML to Markdown converter
+from html_to_markdown import HtmlToMarkdownConverter
 
 
 class PageCrunchSpider(CrawlSpider):
@@ -29,7 +21,10 @@ class PageCrunchSpider(CrawlSpider):
     
     def __init__(self, start_url=None, domain=None, ignore_subdomains='true',
                  refresh_mode='auto', refresh_days=7, db_path=None, 
-                 path_prefix=None, output_cache='true', content_mode='auto', **kwargs):
+                 path_prefix=None, output_cache='true', content_mode='auto',
+                 convert_markdown='false', markdown_heading='atx',
+                 markdown_preserve_images='true', markdown_preserve_tables='true',
+                 markdown_ignore_links='false', markdown_code_highlighting='true', **kwargs):
         """
         Initialization method
         
@@ -43,6 +38,12 @@ class PageCrunchSpider(CrawlSpider):
             path_prefix (str): If specified, only crawl URLs that match this path prefix
             output_cache (str): Whether to output cached pages as well (true/false)
             content_mode (str): Content extraction mode (auto/body) - auto for automatic selection, body to get the entire body tag
+            convert_markdown (str): Whether to convert HTML to Markdown (true/false)
+            markdown_heading (str): Markdown heading style (atx/setext)
+            markdown_preserve_images (str): Whether to preserve image references in Markdown (true/false)
+            markdown_preserve_tables (str): Whether to preserve table structure in Markdown (true/false)
+            markdown_ignore_links (str): Whether to ignore links in Markdown (true/false)
+            markdown_code_highlighting (str): Whether to preserve code highlighting hints in Markdown (true/false)
             **kwargs: Additional parameters
 
         初期化メソッド
@@ -57,6 +58,12 @@ class PageCrunchSpider(CrawlSpider):
             path_prefix (str): 指定した場合、このパスプレフィックスに一致するURLのみをクロール
             output_cache (str): キャッシュされたページも出力するか (true/false)
             content_mode (str): コンテンツ抽出モード (auto/body) - autoは自動選択、bodyはbodyタグ全体を取得
+            convert_markdown (str): HTMLをMarkdownに変換するか (true/false)
+            markdown_heading (str): Markdownの見出しスタイル (atx/setext)
+            markdown_preserve_images (str): Markdownで画像参照を保持するか (true/false)
+            markdown_preserve_tables (str): Markdownでテーブル構造を保持するか (true/false)
+            markdown_ignore_links (str): Markdownでリンクを無視するか (true/false)
+            markdown_code_highlighting (str): Markdownでコードハイライト情報を保持するか (true/false)
             **kwargs: 追加のパラメータ
         """
 
@@ -79,6 +86,17 @@ class PageCrunchSpider(CrawlSpider):
         self.output_cache = output_cache.lower() == 'true'
         self.content_mode = content_mode.lower()
         self.prime_directive = kwargs.get('prime_directive', 'true').lower() == 'true'
+        
+        # Markdown conversion settings
+        # Markdown変換設定
+        self.convert_markdown = convert_markdown.lower() == 'true'
+        self.markdown_options = {
+            'heading_style': markdown_heading.lower(),
+            'preserve_images': markdown_preserve_images.lower() == 'true',
+            'preserve_tables': markdown_preserve_tables.lower() == 'true',
+            'ignore_links': markdown_ignore_links.lower() == 'true',
+            'code_highlighting': markdown_code_highlighting.lower() == 'true'
+        }
         
         # Log level settings (change from INFO -> WARN to suppress log output)
         # ログレベル設定（INFO -> WARN に変更してログ出力を抑制）
@@ -125,6 +143,187 @@ class PageCrunchSpider(CrawlSpider):
         self.log(f"  path_prefix: {self.path_prefix}", self.log_level)
         self.log(f"  output_cache: {self.output_cache}", self.log_level)
         self.log(f"  content_mode: {self.content_mode}", self.log_level)
+        self.log(f"  convert_markdown: {self.convert_markdown}", self.log_level)
+        if self.convert_markdown:
+            self.log(f"  markdown_options: {self.markdown_options}", self.log_level)
+    
+    def parse_item(self, response):
+        """
+        Process the page
+        ページの処理
+        """
+        url = response.url
+        url_clean = url_query_cleaner(url)
+        
+        # Skip if robots meta tag does not allow
+        # robots メタタグが許可しない場合はスキップ
+        if not self._is_robots_allowed(response):
+            self.log(f"Skipping {url} due to robots restrictions", self.log_level)
+            return
+            
+        # Check path_prefix restriction
+        # path_prefix 制限をチェック
+        if not self._is_valid_path(url_clean):
+            self.log(f"Skipping {url} due to path_prefix restrictions", self.log_level)
+            return
+        
+        # Extract content and calculate hash
+        # コンテンツの抽出とハッシュ計算
+        content = self.extract_content(response)
+        content_hash = self.calculate_content_hash(content)
+        
+        # Get title and meta description
+        # タイトルとメタ説明の取得
+        title = response.css('title::text').get() or ""
+        meta_description = response.xpath('//meta[@name="description"]/@content').get() or ""
+        
+        # Get robots meta tag information
+        # robots メタタグ情報
+        robots_meta = response.xpath('//meta[@name="robots"]/@content').get() or ""
+        
+        # Get content status
+        # 既存のハッシュ値を取得
+        should_crawl, previous_hash, last_crawled_at, status = self.should_crawl_url(url_clean)
+        
+        # Get content status
+        # コンテンツステータス
+        content_status = self.get_content_status(content_hash, previous_hash)
+        
+        # Convert to Markdown if enabled
+        # Markdown変換が有効な場合は変換
+        markdown_result = {}
+        if self.convert_markdown:
+            markdown_result = self.convert_to_markdown(content, url=url_clean)
+        
+        # Extract links for future use
+        # 将来の使用のためにリンクを抽出
+        try:
+            extracted_links = self.link_extractor.extract_links(response)
+            self.log(f"Extracted {len(extracted_links)} links from {url}", self.log_level)
+        except Exception as e:
+            self.log(f"Error extracting links from {url}: {e}", logging.ERROR)
+            extracted_links = []
+        
+        # Generate results for JSONL output regardless of whether to crawl
+        # クロールするかどうかに関わらず、JSONLに出力するための結果を生成
+        if not should_crawl and previous_hash and self.output_cache:
+            # Output information from cache if already crawled and not re-crawling
+            # すでにクロール済みで再クロールしない場合はキャッシュから情報を出力
+            self.log(f"Using cached data for {url}", self.log_level)
+            result = {
+                "url": url_clean,
+                "title": title.strip(),
+                "meta_description": meta_description.strip(),
+                "content": content,
+                "content_hash": previous_hash,
+                "crawled_at": last_crawled_at,
+                "status": status,
+                "length": len(content),
+                "robots_meta": robots_meta,
+                "content_status": content_status
+            }
+            
+            # Add Markdown content if enabled
+            # Markdown変換が有効な場合はMarkdownコンテンツを追加
+            if self.convert_markdown:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                
+                # Retrieve markdown hash from database
+                cursor.execute("SELECT markdown_hash FROM crawled_urls WHERE url = ?", (url_clean,))
+                db_result = cursor.fetchone()
+                conn.close()
+                
+                if db_result and db_result[0]:
+                    # If we have a stored markdown hash, reuse it
+                    result.update({
+                        "markdown_content": markdown_result.get("markdown_content", ""),
+                        "markdown_hash": db_result[0],
+                        "markdown_length": markdown_result.get("markdown_length", 0),
+                    })
+                else:
+                    # If no stored markdown hash, generate it now
+                    result.update(markdown_result)
+            
+            yield result
+        elif should_crawl or not previous_hash:
+            # Update DB and then output if new or update needed
+            # Update URL database
+            # 新規または更新が必要な場合はDBを更新してから出力
+            # URL データベースの更新
+            markdown_hash = markdown_result.get("markdown_hash") if self.convert_markdown else None
+            self.update_url_database(url_clean, content_hash, response.status, markdown_hash)
+            
+            # 結果の生成
+            result = {
+                "url": url_clean,
+                "title": title.strip(),
+                "meta_description": meta_description.strip(),
+                "content": content,
+                "content_hash": content_hash,
+                "crawled_at": datetime.datetime.now().isoformat(),
+                "status": response.status,
+                "length": len(content),
+                "robots_meta": robots_meta,
+                "content_status": content_status
+            }
+            
+            # Add Markdown content if enabled
+            # Markdown変換が有効な場合はMarkdownコンテンツを追加
+            if self.convert_markdown:
+                result.update(markdown_result)
+                
+            yield result
+        
+        # Process links, regardless of whether the page itself was from cache
+        # ページ自体がキャッシュからのものでも、リンクを処理
+        for link in extracted_links:
+            # Check nofollow
+            # nofollow チェック（prime_directive が有効な場合）
+            if self.prime_directive and 'nofollow' in (link.attrs.get('rel', '') if hasattr(link, 'attrs') else getattr(link, 'rel', '')):
+                continue
+                
+            link_url = link.url
+            
+            # Remove query parameters
+            # クエリパラメータを削除したクリーンな URL
+            clean_url = url_query_cleaner(link_url)
+            
+            # Check if same domain
+            # 同一ドメインチェック
+            if not self._is_same_domain(clean_url):
+                continue
+                
+            # Check if it should be crawled
+            # クロールすべきかチェック
+            should_follow, _, _, _ = self.should_crawl_url(clean_url)
+            
+            # Add custom error handling for DNS lookup issues
+            # DNSルックアップの問題に対するカスタムエラー処理を追加
+            if should_follow:
+                try:
+                    # Use errback to handle failures
+                    # 失敗を処理するためにerrbackを使用
+                    yield Request(
+                        link_url, 
+                        callback=self.parse_item,
+                        errback=self.handle_error
+                    )
+                except Exception as e:
+                    self.log(f"Error creating request for {link_url}: {e}", logging.ERROR)
+    
+    def handle_error(self, failure):
+        """
+        Handle request errors, like DNS lookup failures
+        DNSルックアップ失敗などのリクエストエラーを処理
+        """
+        request = failure.request
+        self.log(f"Request for {request.url} failed: {repr(failure)}", logging.WARNING)
+        
+        # You could add the URL to a "failed" list for retry later, or
+        # implement custom error handling depending on the error type
+        # あとで再試行するために「失敗」リストにURLを追加することも、
+        # エラータイプに応じてカスタムエラー処理を実装することもできます
     
     def _get_top_domain(self, domain):
         """
@@ -171,6 +370,7 @@ class PageCrunchSpider(CrawlSpider):
         CREATE TABLE IF NOT EXISTS crawled_urls (
             url TEXT PRIMARY KEY,
             content_hash TEXT,
+            markdown_hash TEXT,
             first_crawled_at TIMESTAMP,
             last_crawled_at TIMESTAMP,
             change_count INTEGER DEFAULT 0,
@@ -229,7 +429,7 @@ class PageCrunchSpider(CrawlSpider):
         # デフォルトはクロールしない
         return False, existing_hash, last_crawled_str, status
     
-    def update_url_database(self, url, content_hash, status):
+    def update_url_database(self, url, content_hash, status, markdown_hash=None):
         """
         Update the URL database
 
@@ -237,6 +437,7 @@ class PageCrunchSpider(CrawlSpider):
             url (str): URL to update
             content_hash (str): Content hash
             status (int): HTTP status code
+            markdown_hash (str, optional): Markdown content hash
         
         URL データベースを更新
         
@@ -244,31 +445,32 @@ class PageCrunchSpider(CrawlSpider):
             url (str): 更新する URL
             content_hash (str): コンテンツのハッシュ値
             status (int): HTTP ステータスコード
+            markdown_hash (str, optional): Markdownコンテンツのハッシュ値
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         now = datetime.datetime.now().isoformat()
         
-        cursor.execute("SELECT content_hash, change_count FROM crawled_urls WHERE url = ?", (url,))
+        cursor.execute("SELECT content_hash, markdown_hash, change_count FROM crawled_urls WHERE url = ?", (url,))
         result = cursor.fetchone()
         
         if not result:
             # New URL
             # 新規 URL の場合
             cursor.execute(
-                "INSERT INTO crawled_urls (url, content_hash, first_crawled_at, last_crawled_at, change_count, status) VALUES (?, ?, ?, ?, ?, ?)",
-                (url, content_hash, now, now, 0, status)
+                "INSERT INTO crawled_urls (url, content_hash, markdown_hash, first_crawled_at, last_crawled_at, change_count, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (url, content_hash, markdown_hash, now, now, 0, status)
             )
         else:
-            existing_hash, change_count = result
+            existing_hash, existing_md_hash, change_count = result
             # Hash changed
             # ハッシュが変わった場合は変更回数を増やす
-            if existing_hash != content_hash:
+            if existing_hash != content_hash or (markdown_hash and existing_md_hash != markdown_hash):
                 change_count += 1
             
             cursor.execute(
-                "UPDATE crawled_urls SET content_hash = ?, last_crawled_at = ?, change_count = ?, status = ? WHERE url = ?",
-                (content_hash, now, change_count, status, url)
+                "UPDATE crawled_urls SET content_hash = ?, markdown_hash = ?, last_crawled_at = ?, change_count = ?, status = ? WHERE url = ?",
+                (content_hash, markdown_hash, now, change_count, status, url)
             )
         
         conn.commit()
@@ -466,120 +668,63 @@ class PageCrunchSpider(CrawlSpider):
         else:
             return "unchanged"
     
+    def convert_to_markdown(self, html_content, url=None):
+        """
+        Convert HTML content to Markdown
+        
+        Args:
+            html_content (str): HTML content to convert
+            url (str, optional): URL for resolving relative links
+            
+        Returns:
+            dict: Dictionary with Markdown content and related info
+        
+        HTMLコンテンツをMarkdownに変換
+        
+        Args:
+            html_content (str): 変換するHTMLコンテンツ
+            url (str, optional): 相対リンク解決のためのURL
+            
+        Returns:
+            dict: Markdownコンテンツと関連情報を含む辞書
+        """
+        if not html_content:
+            return {
+                "markdown_content": "",
+                "markdown_hash": self.calculate_content_hash(""),
+                "markdown_length": 0
+            }
+        
+        # Initialize converter with our options
+        converter = HtmlToMarkdownConverter(
+            base_url=url,
+            **self.markdown_options
+        )
+        
+        # Convert HTML to Markdown
+        markdown_content = converter.convert(html_content)
+        
+        # Calculate hash
+        markdown_hash = self.calculate_content_hash(markdown_content)
+        
+        return {
+            "markdown_content": markdown_content,
+            "markdown_hash": markdown_hash,
+            "markdown_length": len(markdown_content)
+        }
+    
     def start_requests(self):
         """
         Generate crawl start requests
         クロール開始リクエストを生成
         """
         for url in self.start_urls:
-            yield scrapy.Request(url, self.parse_item, dont_filter=True)
-    
-    def parse_item(self, response):
-        """
-        Process the page
-        ページの処理
-        """
-        url = response.url
-        url_clean = url_query_cleaner(url)
-        
-        # Skip if robots meta tag does not allow
-        # robots メタタグが許可しない場合はスキップ
-        if not self._is_robots_allowed(response):
-            self.log(f"Skipping {url} due to robots restrictions", self.log_level)
-            return
-            
-        # Check path_prefix restriction
-        # path_prefix 制限をチェック
-        if not self._is_valid_path(url_clean):
-            self.log(f"Skipping {url} due to path_prefix restrictions", self.log_level)
-            return
-        
-        # Extract content and calculate hash
-        # コンテンツの抽出とハッシュ計算
-        content = self.extract_content(response)
-        content_hash = self.calculate_content_hash(content)
-        
-        # Get title and meta description
-        # タイトルとメタ説明の取得
-        title = response.css('title::text').get() or ""
-        meta_description = response.xpath('//meta[@name="description"]/@content').get() or ""
-        
-        # Get robots meta tag information
-        # robots メタタグ情報
-        robots_meta = response.xpath('//meta[@name="robots"]/@content').get() or ""
-        
-        # Get content status
-        # 既存のハッシュ値を取得
-        should_crawl, previous_hash, last_crawled_at, status = self.should_crawl_url(url_clean)
-        
-        # Get content status
-        # コンテンツステータス
-        content_status = self.get_content_status(content_hash, previous_hash)
-        
-        # Generate results for JSONL output regardless of whether to crawl
-        # クロールするかどうかに関わらず、JSONLに出力するための結果を生成
-        if not should_crawl and previous_hash and self.output_cache:
-            # Output information from cache if already crawled and not re-crawling
-            # すでにクロール済みで再クロールしない場合はキャッシュから情報を出力
-            self.log(f"Using cached data for {url}", self.log_level)
-            yield {
-                "url": url_clean,
-                "title": title.strip(),
-                "meta_description": meta_description.strip(),
-                "content": content,
-                "content_hash": previous_hash,
-                "crawled_at": last_crawled_at,
-                "status": status,
-                "length": len(content),
-                "robots_meta": robots_meta,
-                "content_status": content_status
-            }
-        elif should_crawl or not previous_hash:
-            # Update DB and then output if new or update needed
-            # Update URL database
-            # 新規または更新が必要な場合はDBを更新してから出力
-            # URL データベースの更新
-            self.update_url_database(url_clean, content_hash, response.status)
-            
-            # 結果の生成
-            yield {
-                "url": url_clean,
-                "title": title.strip(),
-                "meta_description": meta_description.strip(),
-                "content": content,
-                "content_hash": content_hash,
-                "crawled_at": datetime.datetime.now().isoformat(),
-                "status": response.status,
-                "length": len(content),
-                "robots_meta": robots_meta,
-                "content_status": content_status
-            }
-        
-        # Extract links and request next pages
-        # リンクの抽出と次のページのリクエスト
-        links = self.link_extractor.extract_links(response)
-        for link in links:
-            # Check nofollow
-            # nofollow チェック（prime_directive が有効な場合）
-            if self.prime_directive and 'nofollow' in (link.attrs.get('rel', '') if hasattr(link, 'attrs') else getattr(link, 'rel', '')):
-                continue
-                
-            link_url = link.url
-            
-            # Remove query parameters
-            # クエリパラメータを削除したクリーンな URL
-            clean_url = url_query_cleaner(link_url)
-            
-            # Check if same domain
-            # 同一ドメインチェック
-            if not self._is_same_domain(clean_url):
-                continue
-                
-            # Check if it should be crawled
-            # クロールすべきかチェック
-            should_crawl, _, _, _ = self.should_crawl_url(clean_url)
-            if should_crawl:
-                yield scrapy.Request(link_url, callback=self.parse_item)
+            yield scrapy.Request(
+                url, 
+                callback=self.parse_item, 
+                errback=self.handle_error,  # エラー処理を追加
+                dont_filter=True
+            )
     
     def closed(self, reason):
         """
