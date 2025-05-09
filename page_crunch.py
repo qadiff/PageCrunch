@@ -111,8 +111,8 @@ class PageCrunchSpider(CrawlSpider):
         # Domain settings processing
         # ドメイン設定の処理
         self.top_domain = self._get_top_domain(domain)
-        if self.ignore_subdomains:
-            self.allowed_domains = [self.top_domain]
+        #if self.ignore_subdomains:
+        #    self.allowed_domains = [self.top_domain]
         
         # Database settings
         # データベース設定
@@ -520,8 +520,16 @@ class PageCrunchSpider(CrawlSpider):
         url_domain = parsed_url.netloc
         
         if self.ignore_subdomains:
-            url_top_domain = self._get_top_domain(url_domain)
-            return url_top_domain == self.top_domain
+            # まず完全一致を確認
+            if url_domain in self.allowed_domains:
+                return True
+            
+            # 次に、URLのドメインが許可されたドメインのサブドメインかどうかを確認
+            for allowed_domain in self.allowed_domains:
+                if url_domain.endswith('.' + allowed_domain):
+                    return True
+            
+            return False
         else:
             return url_domain in self.allowed_domains
     
