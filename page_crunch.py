@@ -74,6 +74,13 @@ class PageCrunchSpider(CrawlSpider):
         if not domain:
             parsed_url = urlparse(start_url)
             domain = parsed_url.netloc
+        if path_prefix:
+            if isinstance(path_prefix, str) and ',' in path_prefix:
+                self.path_prefix = [p.strip() for p in path_prefix.split(',')]
+            else:
+                self.path_prefix = [path_prefix]
+        else:
+            self.path_prefix = None
         
         # Parameter settings
         # パラメータの設定
@@ -154,6 +161,10 @@ class PageCrunchSpider(CrawlSpider):
         """
         url = response.url
         url_clean = url_query_cleaner(url)
+
+        # レスポンスの種類を確認
+        content_type = response.headers.get('Content-Type', b'').decode('utf-8', 'ignore').lower()
+        is_json = 'application/json' in content_type or url.endswith('.json')
         
         # Skip if robots meta tag does not allow
         # robots メタタグが許可しない場合はスキップ
@@ -172,15 +183,23 @@ class PageCrunchSpider(CrawlSpider):
         content = self.extract_content(response)
         content_hash = self.calculate_content_hash(content)
         
-        # Get title and meta description
-        # タイトルとメタ説明の取得
-        title = response.css('title::text').get() or ""
-        meta_description = response.xpath('//meta[@name="description"]/@content').get() or ""
+        # Get title and meta description (JSONの場合はデフォルト値)
+        title = ""
+        meta_description = ""
+        robots_meta = ""
         
-        # Get robots meta tag information
-        # robots メタタグ情報
-        robots_meta = response.xpath('//meta[@name="robots"]/@content').get() or ""
-        
+        if not is_json:
+            try:
+                title = response.css('title::text').get() or ""
+                meta_description = response.xpath('//meta[@name="description"]/@content').get() or ""
+                robots_meta = response.xpath('//meta[@name="robots"]/@content').get() or ""
+            except ValueError:
+                # XPathが使用できないレスポンスタイプの場合
+                self.log(f"Cannot extract metadata using XPath for {response.url}", logging.DEBUG)
+            except Exception as e:
+                # その他の例外
+                self.log(f"Error extracting metadata for {response.url}: {e}", logging.ERROR)    
+
         # Get content status
         # 既存のハッシュ値を取得
         should_crawl, previous_hash, last_crawled_at, status = self.should_crawl_url(url_clean)
@@ -352,10 +371,52 @@ class PageCrunchSpider(CrawlSpider):
         Returns:
             bool: パスが一致するか
         """
+        # パスプレフィックスが指定されていない場合は全て許可
         if not self.path_prefix:
-            return True  # If path_prefix is not specified, allow all URLs
+            return True
+        
+        # URLからクエリパラメータを除去
+        clean_url = url.split('?')[0]
+        
+        # 起点URLは常に許可する特別処理
+        for start_url in self.start_urls:
+            clean_start_url = start_url.split('?')[0]
+            if clean_url == clean_start_url:
+                return True
+        
+        # すべてリストとして扱う
+        prefixes = []
+        if isinstance(self.path_prefix, list):
+            prefixes = self.path_prefix
+        elif isinstance(self.path_prefix, str) and ',' in self.path_prefix:
+            prefixes = [p.strip() for p in self.path_prefix.split(',')]
+        else:
+            prefixes = [self.path_prefix]
+        
+        for prefix in prefixes:
+            # クエリパラメータを除去
+            clean_prefix = prefix.split('?')[0]
             
-        return url.startswith(self.path_prefix)
+            # 完全一致またはプレフィックス一致
+            if clean_url == clean_prefix or clean_url.startswith(clean_prefix):
+                return True
+            
+            # 階層関係チェック - URLがプレフィックスの親パスかどうか
+            prefix_parts = clean_prefix.rstrip('/').split('/')
+            url_parts = clean_url.rstrip('/').split('/')
+            
+            # URLの方が短い場合は、URLがパスプレフィックスの親パスである可能性がある
+            if len(url_parts) < len(prefix_parts):
+                # URLがパスプレフィックスの先頭部分と一致するか確認
+                is_parent = True
+                for i in range(len(url_parts)):
+                    if url_parts[i] != prefix_parts[i]:
+                        is_parent = False
+                        break
+                if is_parent:
+                    return True
+        
+        return False
     
     def setup_database(self):
         """
@@ -554,14 +615,73 @@ class PageCrunchSpider(CrawlSpider):
         if not self.prime_directive:
             return True
         
-        robots_meta = response.xpath('//meta[@name="robots"]/@content').get()
-        if robots_meta:
-            if 'noindex' in robots_meta.lower():
-                self.log(f"Skipping {response.url} due to robots meta noindex", logging.DEBUG)
-                return False
+        # レスポンスの種類を確認
+        content_type = response.headers.get('Content-Type', b'').decode('utf-8', 'ignore').lower()
+        is_json = 'application/json' in content_type or response.url.endswith('.json')
+        
+        # JSONの場合はrobots metaタグのチェックをスキップ
+        if is_json:
+            return True
+        
+        # Try-exceptで例外を捕捉
+        try:
+            robots_meta = response.xpath('//meta[@name="robots"]/@content').get()
+            if robots_meta:
+                if 'noindex' in robots_meta.lower():
+                    self.log(f"Skipping {response.url} due to robots meta noindex", logging.DEBUG)
+                    return False
+        except ValueError:
+            # XPathが使用できないレスポンスタイプの場合
+            self.log(f"Cannot check robots meta for {response.url} due to response type", logging.DEBUG)
+            return True
+        except Exception as e:
+            # その他の例外
+            self.log(f"Error checking robots meta for {response.url}: {e}", logging.ERROR)
+            return True
         
         return True
     
+    def _get_response_encoding(self, response):
+        """
+        レスポンスのエンコーディングを取得
+        
+        Args:
+            response (Response): レスポンスオブジェクト
+            
+        Returns:
+            str: エンコーディング
+        """
+        # Scrapyが検出したエンコーディングを優先使用（最も信頼性が高い）
+        if hasattr(response, 'encoding') and response.encoding:
+            return response.encoding
+            
+        # Content-Typeヘッダーからcharsetを抽出
+        content_type = response.headers.get('Content-Type', b'').decode('utf-8', 'ignore')
+        charset = None
+        
+        # Content-Typeにcharsetが指定されている場合
+        if 'charset=' in content_type.lower():
+            charset = content_type.lower().split('charset=')[-1].split(';')[0].strip()
+        
+        # メタタグから文字コードを取得（HTMLの場合のみ）
+        if not charset and not ('application/json' in content_type.lower() or response.url.endswith('.json')):
+            try:
+                # <meta charset="xxx"> 形式
+                meta_charset = response.xpath('//meta[@charset]/@charset').get()
+                if meta_charset:
+                    charset = meta_charset
+                else:
+                    # <meta http-equiv="Content-Type" content="text/html; charset=xxx"> 形式
+                    meta_content_type = response.xpath('//meta[@http-equiv="Content-Type"]/@content').get()
+                    if meta_content_type and 'charset=' in meta_content_type.lower():
+                        charset = meta_content_type.lower().split('charset=')[-1].split(';')[0].strip()
+            except (ValueError, AttributeError):
+                # XPathが使用できないレスポンスタイプの場合は無視
+                pass
+        
+        # デフォルトはUTF-8
+        return charset or 'utf-8'
+
     def extract_content(self, response):
         """
         Extract the main content
@@ -580,44 +700,60 @@ class PageCrunchSpider(CrawlSpider):
         Returns:
             str: 抽出されたメインコンテンツ
         """
-        # コンテンツモードがbodyの場合は、bodyタグ全体を取得
-        if self.content_mode == 'body':
+        content_type = response.headers.get('Content-Type', b'').decode('utf-8', 'ignore').lower()
+        is_json = 'application/json' in content_type or response.url.endswith('.json')
+    
+        # JSONの場合はそのままテキストとして返す
+        if is_json:
+            return response.text
+        
+        try:
+            # コンテンツモードがbodyの場合は、bodyタグ全体を取得
+            if self.content_mode == 'body':
+                body_content = response.xpath('//body').get()
+                if body_content:
+                    return self._clean_html(body_content)
+                return self._clean_html(response.text)
+                
+            # コンテンツモードがautoまたはその他の場合は、通常の抽出ロジックを使用
+            # コンテンツ抽出の優先順位
+            # 1. main タグ
+            # 2. article タグ
+            # 3. .content または #content
+            # 4. .main または #main
+            # 5. body タグ（最後の手段）
+            
+            main_content = response.xpath('//main').get()
+            if main_content:
+                return self._clean_html(main_content)
+            
+            article_content = response.xpath('//article').get()
+            if article_content:
+                return self._clean_html(article_content)
+            
+            content_div = response.css('.content, #content').get()
+            if content_div:
+                return self._clean_html(content_div)
+            
+            main_div = response.css('.main, #main').get()
+            if main_div:
+                return self._clean_html(main_div)
+            
+            # 最後の手段として body コンテンツを使用
             body_content = response.xpath('//body').get()
             if body_content:
                 return self._clean_html(body_content)
-            return self._clean_html(response.text)
             
-        # コンテンツモードがautoまたはその他の場合は、通常の抽出ロジックを使用
-        # コンテンツ抽出の優先順位
-        # 1. main タグ
-        # 2. article タグ
-        # 3. .content または #content
-        # 4. .main または #main
-        # 5. body タグ（最後の手段）
-        
-        main_content = response.xpath('//main').get()
-        if main_content:
-            return self._clean_html(main_content)
-        
-        article_content = response.xpath('//article').get()
-        if article_content:
-            return self._clean_html(article_content)
-        
-        content_div = response.css('.content, #content').get()
-        if content_div:
-            return self._clean_html(content_div)
-        
-        main_div = response.css('.main, #main').get()
-        if main_div:
-            return self._clean_html(main_div)
-        
-        # 最後の手段として body コンテンツを使用
-        body_content = response.xpath('//body').get()
-        if body_content:
-            return self._clean_html(body_content)
-        
-        # 何も見つからない場合は HTML 全体を返す
-        return self._clean_html(response.text)
+            # 何も見つからない場合は HTML 全体を返す
+            return self._clean_html(response.text)
+        except ValueError:
+            # XPathが使用できないレスポンスタイプの場合
+            self.log(f"Cannot extract content using XPath for {response.url} due to response type", logging.DEBUG)
+            return response.text
+        except Exception as e:
+            # その他の例外
+            self.log(f"Error extracting content for {response.url}: {e}", logging.ERROR)
+            return response.text
     
     def _clean_html(self, html):
         """
