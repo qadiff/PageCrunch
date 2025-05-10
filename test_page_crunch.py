@@ -294,19 +294,38 @@ class TestPageCrunchSpider(unittest.TestCase):
         # noindex メタタグがある場合
         with patch.object(self.spider, 'prime_directive', True):
             mock_response = MagicMock()
+            # URLとヘッダーを明示的に設定
+            mock_response.url = "https://example.com"
+            mock_response.headers = {'Content-Type': b'text/html'}
             mock_response.xpath.return_value.get.return_value = "noindex, follow"
             self.assertFalse(self.spider._is_robots_allowed(mock_response))
         
         # robots メタタグがない場合
         with patch.object(self.spider, 'prime_directive', True):
             mock_response = MagicMock()
+            # URLとヘッダーを明示的に設定
+            mock_response.url = "https://example.com"
+            mock_response.headers = {'Content-Type': b'text/html'}
             mock_response.xpath.return_value.get.return_value = None
             self.assertTrue(self.spider._is_robots_allowed(mock_response))
         
         # noindex を含まない robots メタタグがある場合
         with patch.object(self.spider, 'prime_directive', True):
             mock_response = MagicMock()
+            # URLとヘッダーを明示的に設定
+            mock_response.url = "https://example.com"
+            mock_response.headers = {'Content-Type': b'text/html'}
             mock_response.xpath.return_value.get.return_value = "follow"
+            self.assertTrue(self.spider._is_robots_allowed(mock_response))
+        
+        # JSONレスポンスの場合は常に許可
+        with patch.object(self.spider, 'prime_directive', True):
+            mock_response = MagicMock()
+            # JSONのURLとヘッダーを設定
+            mock_response.url = "https://example.com/data.json"
+            mock_response.headers = {'Content-Type': b'application/json'}
+            # noindexが含まれていてもJSONなので許可される
+            mock_response.xpath.return_value.get.return_value = "noindex, follow"
             self.assertTrue(self.spider._is_robots_allowed(mock_response))
 
     def test_extract_content(self):
