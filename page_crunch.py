@@ -74,6 +74,13 @@ class PageCrunchSpider(CrawlSpider):
         if not domain:
             parsed_url = urlparse(start_url)
             domain = parsed_url.netloc
+        if path_prefix:
+            if isinstance(path_prefix, str) and ',' in path_prefix:
+                self.path_prefix = [p.strip() for p in path_prefix.split(',')]
+            else:
+                self.path_prefix = [path_prefix]
+        else:
+            self.path_prefix = None
         
         # Parameter settings
         # パラメータの設定
@@ -352,10 +359,52 @@ class PageCrunchSpider(CrawlSpider):
         Returns:
             bool: パスが一致するか
         """
+        # パスプレフィックスが指定されていない場合は全て許可
         if not self.path_prefix:
-            return True  # If path_prefix is not specified, allow all URLs
+            return True
+        
+        # URLからクエリパラメータを除去
+        clean_url = url.split('?')[0]
+        
+        # 起点URLは常に許可する特別処理
+        for start_url in self.start_urls:
+            clean_start_url = start_url.split('?')[0]
+            if clean_url == clean_start_url:
+                return True
+        
+        # すべてリストとして扱う
+        prefixes = []
+        if isinstance(self.path_prefix, list):
+            prefixes = self.path_prefix
+        elif isinstance(self.path_prefix, str) and ',' in self.path_prefix:
+            prefixes = [p.strip() for p in self.path_prefix.split(',')]
+        else:
+            prefixes = [self.path_prefix]
+        
+        for prefix in prefixes:
+            # クエリパラメータを除去
+            clean_prefix = prefix.split('?')[0]
             
-        return url.startswith(self.path_prefix)
+            # 完全一致またはプレフィックス一致
+            if clean_url == clean_prefix or clean_url.startswith(clean_prefix):
+                return True
+            
+            # 階層関係チェック - URLがプレフィックスの親パスかどうか
+            prefix_parts = clean_prefix.rstrip('/').split('/')
+            url_parts = clean_url.rstrip('/').split('/')
+            
+            # URLの方が短い場合は、URLがパスプレフィックスの親パスである可能性がある
+            if len(url_parts) < len(prefix_parts):
+                # URLがパスプレフィックスの先頭部分と一致するか確認
+                is_parent = True
+                for i in range(len(url_parts)):
+                    if url_parts[i] != prefix_parts[i]:
+                        is_parent = False
+                        break
+                if is_parent:
+                    return True
+        
+        return False
     
     def setup_database(self):
         """

@@ -97,7 +97,7 @@ class TestPageCrunchSpider(unittest.TestCase):
             self.assertTrue(self.spider._is_valid_path("https://example.com/blog/"))
             self.assertTrue(self.spider._is_valid_path("https://example.com/blog/post1"))
             self.assertFalse(self.spider._is_valid_path("https://example.com/about"))
-            self.assertFalse(self.spider._is_valid_path("https://example.com/"))
+            self.assertTrue(self.spider._is_valid_path("https://example.com/"))
 
     def test_setup_database(self):
         """setup_database メソッドのテスト"""
@@ -519,7 +519,7 @@ class TestPageCrunchSpider(unittest.TestCase):
         </html>
         """
         response = HtmlResponse(url="https://example.com/", body=html, encoding='utf-8')
-        
+          
         # パターン1: path_prefix あり
         with patch.object(self.spider, 'path_prefix', "https://example.com/blog/"):
             with patch.object(self.spider, '_is_robots_allowed', return_value=True):
@@ -537,10 +537,10 @@ class TestPageCrunchSpider(unittest.TestCase):
                             
                             # 結果の確認
                             requests = [r for r in results if isinstance(r, scrapy.Request)]
-                            # blog/ から始まるリンクのみが処理されるべき
-                            self.assertEqual(len(requests), 0)  # ここでは0になる（_is_valid_path の評価が先に行われるため）
+                            # 修正: 階層関係チェックにより、両方のリンクが許可される
+                            self.assertEqual(len(requests), 2)  # 0から2に変更
         
-        # パターン2: path_prefix なし
+        # パターン2: path_prefix なし (変更なし)
         with patch.object(self.spider, 'path_prefix', None):
             with patch.object(self.spider, '_is_robots_allowed', return_value=True):
                 with patch.object(self.spider, 'should_crawl_url', return_value=(True, None, None, None)):
