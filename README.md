@@ -222,6 +222,81 @@ This will also generate a coverage report.
 
 ---
 
+### Overview
+
+`split_markdown.py` is a command-line tool that splits large Markdown files into smaller chunks based on a specified size. This can be useful for managing oversized documentation, breaking down large blog posts, or handling any Markdown file that has become too large.
+
+### Features
+
+- Split Markdown files based on specified size
+- Customizable output file prefix
+- Support for various size units (KB, MB, GB)
+- Option to specify output directory
+- Linux-style command-line arguments
+
+### Requirements
+
+- Python 3.6 or higher
+
+### Installation
+
+1. Download the script:
+   ```bash
+   wget https://path/to/split_markdown.py
+   ```
+
+2. Make it executable:
+   ```bash
+   chmod +x split_markdown.py
+   ```
+
+### Usage
+
+Basic usage:
+```bash
+./split_markdown.py -i your_large_file.md
+```
+
+All options:
+```bash
+./split_markdown.py -i your_large_file.md -s 500k -p chapter_ -o output_folder
+```
+
+### Command-line Arguments
+
+| Argument | Long Form | Description | Default |
+|----------|-----------|-------------|---------|
+| `-i` | `--input` | Input file to split (required) | N/A |
+| `-s` | `--size` | Split size (e.g., 500k, 1m, 2g) | 1m |
+| `-p` | `--prefix` | Output file prefix | part_ |
+| `-o` | `--output-dir` | Output directory | Current directory |
+
+Size units:
+- `k`: Kilobytes (1024 bytes)
+- `m`: Megabytes (1024 kilobytes)
+- `g`: Gigabytes (1024 megabytes)
+- `b`: Bytes
+- No unit: Bytes
+
+### Examples
+
+Split a file into 500KB chunks:
+```bash
+./split_markdown.py -i document.md -s 500k
+```
+
+Split a file into 2MB chunks with a custom prefix:
+```bash
+./split_markdown.py -i document.md -s 2m -p section_
+```
+
+Split a file and save chunks to a specific directory:
+```bash
+./split_markdown.py -i document.md -o ./split_files
+```
+
+---
+
 ## 🤝 Contributing
 
 Pull requests are welcome! For major changes, please open an issue first to discuss.
